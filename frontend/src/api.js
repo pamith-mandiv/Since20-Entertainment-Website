@@ -1,8 +1,8 @@
-const BASE_URL = 'http://localhost:5001/api';
+const API_ORIGIN = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+const BASE_URL = `${API_ORIGIN.replace(/\/$/, '')}/api`;
 
 // Base URL for media assets (images, audio) served by the backend
-// Change this to your production domain when deploying
-export const BASE_MEDIA_URL = 'http://localhost:5001';
+export const BASE_MEDIA_URL = API_ORIGIN.replace(/\/$/, '');
 
 
 let token = sessionStorage.getItem('token') || null;
