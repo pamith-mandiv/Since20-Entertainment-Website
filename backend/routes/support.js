@@ -1,5 +1,6 @@
 const express = require('express');
-const db = require('../config/db');
+const mongoose = require('mongoose');
+const SupportMessage = require('../models/SupportMessage');
 const { verifyToken, requireAdmin, requireArtist } = require('../middleware/auth');
 
 const router = express.Router();
@@ -18,11 +19,12 @@ router.post('/message', verifyToken, requireArtist, async (req, res) => {
 
   try {
     const artistName = req.user.artist_name || req.user.name;
-    
-    await db.query(
-      'INSERT INTO support_messages (user_id, artist_name, message) VALUES (?, ?, ?)',
-      [req.user.id, artistName, message.trim()]
-    );
+
+    await SupportMessage.create({
+      user_id: req.user.id,
+      artist_name: artistName,
+      message: message.trim()
+    });
 
     res.status(201).json({ message: 'Support message sent to administrator.' });
   } catch (err) {
@@ -38,10 +40,12 @@ router.post('/message', verifyToken, requireArtist, async (req, res) => {
  */
 router.get('/all', verifyToken, requireAdmin, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      'SELECT * FROM support_messages ORDER BY created_at DESC'
-    );
-    res.json(rows);
+    const messages = await SupportMessage.find().sort({ created_at: -1 }).lean();
+    const formatted = messages.map(m => ({
+      ...m,
+      id: m._id.toString()
+    }));
+    res.json(formatted);
   } catch (err) {
     console.error('Error fetching support messages:', err);
     res.status(500).json({ message: 'Failed to retrieve support queries.' });
@@ -55,11 +59,12 @@ router.get('/all', verifyToken, requireAdmin, async (req, res) => {
  */
 router.get('/my', verifyToken, requireArtist, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      'SELECT * FROM support_messages WHERE user_id = ? ORDER BY created_at DESC',
-      [req.user.id]
-    );
-    res.json(rows);
+    const messages = await SupportMessage.find({ user_id: req.user.id }).sort({ created_at: -1 }).lean();
+    const formatted = messages.map(m => ({
+      ...m,
+      id: m._id.toString()
+    }));
+    res.json(formatted);
   } catch (err) {
     console.error('Error fetching my support messages:', err);
     res.status(500).json({ message: 'Failed to retrieve your support queries.' });
@@ -72,16 +77,28 @@ router.get('/my', verifyToken, requireArtist, async (req, res) => {
  * @access  Private (Admin)
  */
 router.put('/reply/:id', verifyToken, requireAdmin, async (req, res) => {
+  const { id } = req.params;
   const { reply } = req.body;
+
   if (!reply || reply.trim() === '') {
     return res.status(400).json({ message: 'Reply message is required.' });
   }
 
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'Invalid support query ID.' });
+  }
+
   try {
-    await db.query(
-      'UPDATE support_messages SET admin_reply = ? WHERE id = ?',
-      [reply.trim(), req.params.id]
+    const updated = await SupportMessage.findByIdAndUpdate(
+      id,
+      { admin_reply: reply.trim() },
+      { new: true }
     );
+
+    if (!updated) {
+      return res.status(404).json({ message: 'Support query not found.' });
+    }
+
     res.json({ message: 'Reply sent successfully.' });
   } catch (err) {
     console.error('Error sending reply:', err);

@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const db = require('../config/db');
+const User = require('../models/User');
 const { JWT_SECRET } = require('../middleware/auth');
 
 const router = express.Router();
@@ -30,24 +30,31 @@ router.post('/register', async (req, res) => {
     return res.status(400).json({ message: 'Password must be at least 8 characters long.' });
   }
 
+  const cleanEmail = email.toLowerCase().trim();
+
   // Restrict registration of the admin email address
-  if (email.toLowerCase() === 'pamithkumaranayaka@gmail.com') {
+  if (cleanEmail === 'pamithkumaranayaka@gmail.com') {
     return res.status(400).json({ message: 'This email is reserved and cannot be registered.' });
   }
 
   try {
-    const [existingUsers] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
-    if (existingUsers && existingUsers.length > 0) {
+    const existingUser = await User.findOne({ email: cleanEmail });
+    if (existingUser) {
       return res.status(400).json({ message: 'An account with this email already exists.' });
     }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    await db.query(
-      'INSERT INTO users (name, email, password, role, phone, artist_name, country) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [name, email, hashedPassword, 'artist', phone, artistName, country]
-    );
+    await User.create({
+      name: name.trim(),
+      email: cleanEmail,
+      password: hashedPassword,
+      role: 'artist',
+      phone: phone.trim(),
+      artist_name: artistName.trim(),
+      country: country.trim()
+    });
 
     res.status(201).json({ message: 'Account registered successfully. You can now log in.' });
   } catch (err) {
@@ -58,34 +65,31 @@ router.post('/register', async (req, res) => {
 
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate user & return JWT token (Single entrance portal)
+ * @desc    Authenticate user & return JWT token
  * @access  Public
  */
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body; // Removed selection role switch from body parameters
+  const { email, password } = req.body;
 
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
 
+  const cleanEmail = email.toLowerCase().trim();
+
   try {
-    // Get user from database
-    const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
-    if (!users || users.length === 0) {
+    const user = await User.findOne({ email: cleanEmail });
+    if (!user) {
       return res.status(401).json({ message: 'Invalid email or password.' });
     }
 
-    const user = users[0];
-
-    // Validate password
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid email or password.' });
     }
 
-    // Generate JWT token containing their actual database role
     const payload = {
-      id: user.id,
+      id: user._id.toString(),
       name: user.name,
       email: user.email,
       role: user.role, // "artist" or "admin"
@@ -98,7 +102,7 @@ router.post('/login', async (req, res) => {
       message: 'Login successful.',
       token,
       user: {
-        id: user.id,
+        id: user._id.toString(),
         name: user.name,
         email: user.email,
         role: user.role,

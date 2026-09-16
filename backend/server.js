@@ -6,6 +6,9 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 
+// Database connection
+const { connectDB } = require('./config/db');
+
 // Routes imports
 const authRoutes = require('./routes/auth');
 const releaseRoutes = require('./routes/releases');
@@ -15,6 +18,9 @@ const contactRoutes = require('./routes/contact');
 const portfolioRoutes = require('./routes/portfolio');
 
 const app = express();
+// Initialize database connection
+connectDB();
+
 const PORT = process.env.PORT || 5001;
 const HOST = '127.0.0.1'; // MUST listen on localhost/127.0.0.1 for security compliance
 

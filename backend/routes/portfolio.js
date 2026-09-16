@@ -1,14 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../config/db');
-const { verifyToken, requireArtist } = require('../middleware/auth');
+const mongoose = require('mongoose');
 const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
 
+const ArtistPortfolio = require('../models/ArtistPortfolio');
+const PortfolioCatalog = require('../models/PortfolioCatalog');
+const ArtistEvent = require('../models/ArtistEvent');
+const User = require('../models/User');
+const { verifyToken, requireArtist } = require('../middleware/auth');
+
 // ─── Allowed image MIME types ────────────────────────────────────────────────
 const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-const ALLOWED_IMAGE_EXTS  = ['.jpg', '.jpeg', '.png', '.webp'];
+const ALLOWED_IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
 
 // ─── Secure Multer for portfolio uploads (images only) ───────────────────────
 const storage = multer.diskStorage({
@@ -16,14 +21,12 @@ const storage = multer.diskStorage({
     cb(null, path.join(__dirname, '../uploads/'));
   },
   filename: (req, file, cb) => {
-    // Use crypto random name to prevent path-traversal and enumeration
     const fileHash = crypto.randomBytes(16).toString('hex');
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, `portfolio-${fileHash}${ext}`);
   }
 });
 
-// File filter: images only, validated by both MIME type AND extension
 const imageFileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
   if (ALLOWED_IMAGE_MIMES.includes(file.mimetype) && ALLOWED_IMAGE_EXTS.includes(ext)) {
@@ -40,40 +43,44 @@ const upload = multer({
 });
 
 // ─── Slug validation helper ───────────────────────────────────────────────────
-// Slugs must be alphanumeric + hyphens, 1–60 chars
 function isValidSlug(slug) {
   return typeof slug === 'string' && /^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]?$/i.test(slug);
 }
 
 // ─── Helper to ensure an artist has an active portfolio record ────────────────
 async function ensurePortfolio(userId) {
-  const [existing] = await db.query('SELECT * FROM artist_portfolios WHERE user_id = ?', [userId]);
-  if (existing && existing.length > 0) {
-    return existing[0];
+  let portfolio = await ArtistPortfolio.findOne({ user_id: userId });
+  if (portfolio) {
+    return portfolio;
   }
-  const [userRows] = await db.query('SELECT name, artist_name, email FROM users WHERE id = ?', [userId]);
-  const user = userRows && userRows[0] ? userRows[0] : {};
-  let baseSlug = (user.artist_name || user.name || `artist-${userId}`)
+
+  const user = await User.findById(userId);
+  let baseSlug = ((user && (user.artist_name || user.name)) || `artist-${userId}`)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || `artist-${userId}`;
 
   // Check if slug taken
-  const [slugTaken] = await db.query('SELECT id FROM artist_portfolios WHERE slug = ?', [baseSlug]);
-  if (slugTaken && slugTaken.length > 0) {
-    baseSlug = `${baseSlug}-${userId}`;
+  const slugTaken = await ArtistPortfolio.findOne({ slug: baseSlug });
+  if (slugTaken) {
+    baseSlug = `${baseSlug}-${userId.toString().slice(-4)}`;
   }
 
-  const defaultDisplayName = user.artist_name || user.name || 'Artist';
-  const defaultEmail = user.email || '';
+  const defaultDisplayName = (user && (user.artist_name || user.name)) || 'Artist';
+  const defaultEmail = (user && user.email) || '';
 
-  await db.query(
-    'INSERT INTO artist_portfolios (user_id, slug, display_name, roles, bio, location, email, website) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [userId, baseSlug, defaultDisplayName, '[]', '', '', defaultEmail, '']
-  );
+  portfolio = await ArtistPortfolio.create({
+    user_id: userId,
+    slug: baseSlug,
+    display_name: defaultDisplayName,
+    roles: [],
+    bio: '',
+    location: '',
+    email: defaultEmail,
+    website: ''
+  });
 
-  const [created] = await db.query('SELECT * FROM artist_portfolios WHERE user_id = ?', [userId]);
-  return created && created.length > 0 ? created[0] : null;
+  return portfolio;
 }
 
 // ─── Private Routes (must be registered BEFORE /:slug) ───────────────────────
@@ -82,31 +89,25 @@ async function ensurePortfolio(userId) {
 router.get('/my/data', verifyToken, requireArtist, async (req, res) => {
   try {
     const userId = req.user.id;
-    let portfolio = await ensurePortfolio(userId);
+    const portfolioDoc = await ensurePortfolio(userId);
+    const portfolio = portfolioDoc.toObject();
 
-    if (portfolio) {
-      if (typeof portfolio.roles === 'string') portfolio.roles = JSON.parse(portfolio.roles || '[]');
-      if (typeof portfolio.theme_options === 'string') portfolio.theme_options = JSON.parse(portfolio.theme_options || '{}');
-      if (typeof portfolio.social_links === 'string') portfolio.social_links = JSON.parse(portfolio.social_links || '[]');
-    }
+    const catalogDocs = await PortfolioCatalog.find({ user_id: userId }).sort({ order_index: 1 }).lean();
+    const catalog = catalogDocs.map(item => ({
+      ...item,
+      id: item._id.toString()
+    }));
 
-    const [catalog] = await db.query('SELECT * FROM portfolio_catalog WHERE user_id = ? ORDER BY order_index ASC', [userId]);
-    const parsedCatalog = catalog.map(item => {
-      if (typeof item.streaming_links === 'string') {
-        item.streaming_links = JSON.parse(item.streaming_links || '{}');
-      }
-      return item;
-    });
-
-    const [events] = await db.query(
-      'SELECT * FROM artist_events WHERE user_id = ? ORDER BY event_date ASC',
-      [userId]
-    );
+    const eventDocs = await ArtistEvent.find({ user_id: userId }).sort({ event_date: 1 }).lean();
+    const events = eventDocs.map(ev => ({
+      ...ev,
+      id: ev._id.toString()
+    }));
 
     res.json({
       portfolio,
-      catalog: parsedCatalog,
-      events: events || []
+      catalog,
+      events
     });
   } catch (err) {
     console.error('Error fetching private portfolio:', err);
@@ -117,11 +118,12 @@ router.get('/my/data', verifyToken, requireArtist, async (req, res) => {
 // GET /api/portfolio/my/events
 router.get('/my/events', verifyToken, requireArtist, async (req, res) => {
   try {
-    const [events] = await db.query(
-      'SELECT * FROM artist_events WHERE user_id = ? ORDER BY event_date ASC',
-      [req.user.id]
-    );
-    res.json(events || []);
+    const events = await ArtistEvent.find({ user_id: req.user.id }).sort({ event_date: 1 }).lean();
+    const formatted = events.map(ev => ({
+      ...ev,
+      id: ev._id.toString()
+    }));
+    res.json(formatted);
   } catch (err) {
     console.error('Error fetching events:', err);
     res.status(500).json({ message: 'Failed to fetch events' });
@@ -134,41 +136,41 @@ router.post('/my/basic', verifyToken, requireArtist, async (req, res) => {
     const userId = req.user.id;
     let { display_name, slug, roles, bio, location, email, website } = req.body;
 
-    // Validate slug format
-    if (!slug || !isValidSlug(slug)) {
+    const cleanSlug = (slug || '').trim().toLowerCase();
+    if (!cleanSlug || !isValidSlug(cleanSlug)) {
       return res.status(400).json({ message: 'Slug must be 3–60 lowercase letters, numbers, or hyphens.' });
     }
 
-    // Enforce input length limits
     if (display_name && display_name.length > 100) return res.status(400).json({ message: 'Display name too long.' });
     if (bio && bio.length > 1000) return res.status(400).json({ message: 'Bio too long (max 1000 chars).' });
     if (location && location.length > 100) return res.status(400).json({ message: 'Location too long.' });
     if (website && website.length > 200) return res.status(400).json({ message: 'Website URL too long.' });
 
-    const [existing] = await db.query('SELECT id FROM artist_portfolios WHERE user_id = ?', [userId]);
-
     // Check slug uniqueness (excluding current user)
-    const [slugCheck] = await db.query(
-      'SELECT id FROM artist_portfolios WHERE slug = ? AND user_id != ?',
-      [slug, userId]
-    );
-    if (slugCheck && slugCheck.length > 0) {
+    const slugCheck = await ArtistPortfolio.findOne({
+      slug: cleanSlug,
+      user_id: { $ne: userId }
+    });
+    if (slugCheck) {
       return res.status(409).json({ message: 'This slug is already taken. Please choose another.' });
     }
 
-    const rolesStr = JSON.stringify(Array.isArray(roles) ? roles.slice(0, 10) : []);
+    const rolesArr = Array.isArray(roles) ? roles.slice(0, 10) : [];
 
-    if (existing && existing.length > 0) {
-      await db.query(
-        'UPDATE artist_portfolios SET slug = ?, display_name = ?, roles = ?, bio = ?, location = ?, email = ?, website = ? WHERE user_id = ?',
-        [slug, display_name, rolesStr, bio, location, email, website, userId]
-      );
-    } else {
-      await db.query(
-        'INSERT INTO artist_portfolios (user_id, slug, display_name, roles, bio, location, email, website) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [userId, slug, display_name, rolesStr, bio, location, email, website]
-      );
-    }
+    await ArtistPortfolio.findOneAndUpdate(
+      { user_id: userId },
+      {
+        slug: cleanSlug,
+        display_name: display_name || '',
+        roles: rolesArr,
+        bio: bio || '',
+        location: location || '',
+        email: email || '',
+        website: website || '',
+        updated_at: new Date()
+      },
+      { upsert: true, new: true }
+    );
 
     res.json({ message: 'Profile updated successfully' });
   } catch (err) {
@@ -181,12 +183,10 @@ router.post('/my/basic', verifyToken, requireArtist, async (req, res) => {
 router.post('/my/images', verifyToken, requireArtist, upload.fields([{ name: 'profile_picture', maxCount: 1 }, { name: 'cover_picture', maxCount: 1 }]), async (req, res) => {
   try {
     const userId = req.user.id;
-    await ensurePortfolio(userId);
+    const portfolio = await ensurePortfolio(userId);
 
-    const [existing] = await db.query('SELECT profile_picture, cover_picture FROM artist_portfolios WHERE user_id = ?', [userId]);
-
-    let profilePic = existing && existing.length > 0 ? existing[0].profile_picture : null;
-    let coverPic = existing && existing.length > 0 ? existing[0].cover_picture : null;
+    let profilePic = portfolio.profile_picture;
+    let coverPic = portfolio.cover_picture;
 
     if (req.files && req.files['profile_picture']) {
       profilePic = '/uploads/' + req.files['profile_picture'][0].filename;
@@ -195,7 +195,10 @@ router.post('/my/images', verifyToken, requireArtist, upload.fields([{ name: 'pr
       coverPic = '/uploads/' + req.files['cover_picture'][0].filename;
     }
 
-    await db.query('UPDATE artist_portfolios SET profile_picture = ?, cover_picture = ? WHERE user_id = ?', [profilePic, coverPic, userId]);
+    portfolio.profile_picture = profilePic;
+    portfolio.cover_picture = coverPic;
+    portfolio.updated_at = new Date();
+    await portfolio.save();
 
     res.json({ message: 'Images updated successfully', profile_picture: profilePic, cover_picture: coverPic });
   } catch (err) {
@@ -208,16 +211,17 @@ router.post('/my/images', verifyToken, requireArtist, upload.fields([{ name: 'pr
 router.post('/my/images/remove', verifyToken, requireArtist, async (req, res) => {
   try {
     const userId = req.user.id;
-    await ensurePortfolio(userId);
-    const { type } = req.body; // 'profile_picture' or 'cover_picture'
+    const portfolio = await ensurePortfolio(userId);
+    const { type } = req.body;
 
-    // Strict whitelist check — prevents SQL column injection
     if (type !== 'profile_picture' && type !== 'cover_picture') {
       return res.status(400).json({ message: 'Invalid image type' });
     }
 
-    const column = type === 'profile_picture' ? 'profile_picture' : 'cover_picture';
-    await db.query(`UPDATE artist_portfolios SET ${column} = NULL WHERE user_id = ?`, [userId]);
+    portfolio[type] = null;
+    portfolio.updated_at = new Date();
+    await portfolio.save();
+
     res.json({ message: `${type === 'profile_picture' ? 'Profile picture' : 'Cover photo'} removed successfully` });
   } catch (err) {
     console.error('Error removing image:', err);
@@ -229,14 +233,17 @@ router.post('/my/images/remove', verifyToken, requireArtist, async (req, res) =>
 router.post('/my/socials', verifyToken, requireArtist, async (req, res) => {
   try {
     const userId = req.user.id;
-    await ensurePortfolio(userId);
+    const portfolio = await ensurePortfolio(userId);
     const { links } = req.body;
 
     if (!Array.isArray(links) || links.length > 20) {
       return res.status(400).json({ message: 'Invalid social links data.' });
     }
 
-    await db.query('UPDATE artist_portfolios SET social_links = ? WHERE user_id = ?', [JSON.stringify(links), userId]);
+    portfolio.social_links = links;
+    portfolio.updated_at = new Date();
+    await portfolio.save();
+
     res.json({ message: 'Social links updated' });
   } catch (err) {
     console.error('Error saving socials:', err);
@@ -248,19 +255,21 @@ router.post('/my/socials', verifyToken, requireArtist, async (req, res) => {
 router.post('/my/theme', verifyToken, requireArtist, async (req, res) => {
   try {
     const userId = req.user.id;
-    await ensurePortfolio(userId);
+    const portfolio = await ensurePortfolio(userId);
     const { theme_options, selected_animation, animation_enabled } = req.body;
 
-    // Update theme_options JSON blob
-    await db.query('UPDATE artist_portfolios SET theme_options = ? WHERE user_id = ?', [JSON.stringify(theme_options), userId]);
-
-    // Update animation columns if provided
+    if (theme_options !== undefined) {
+      portfolio.theme_options = theme_options;
+    }
     if (selected_animation !== undefined) {
-      await db.query('UPDATE artist_portfolios SET selected_animation = ? WHERE user_id = ?', [selected_animation, userId]);
+      portfolio.selected_animation = selected_animation;
     }
     if (animation_enabled !== undefined) {
-      await db.query('UPDATE artist_portfolios SET animation_enabled = ? WHERE user_id = ?', [animation_enabled ? 1 : 0, userId]);
+      portfolio.animation_enabled = Boolean(animation_enabled);
     }
+
+    portfolio.updated_at = new Date();
+    await portfolio.save();
 
     res.json({ message: 'Theme updated' });
   } catch (err) {
@@ -284,14 +293,32 @@ router.post('/my/catalog', verifyToken, requireArtist, upload.single('album_art'
 
     const album_art = '/uploads/' + req.file.filename;
 
-    // get max order index
-    const [catalog] = await db.query('SELECT order_index FROM portfolio_catalog WHERE user_id = ?', [userId]);
-    const nextOrder = catalog.length > 0 ? Math.max(...catalog.map(c => c.order_index)) + 1 : 0;
+    const catalogItems = await PortfolioCatalog.find({ user_id: userId }).select('order_index').lean();
+    const nextOrder = catalogItems.length > 0 ? Math.max(...catalogItems.map(c => c.order_index || 0)) + 1 : 0;
 
-    await db.query(
-      'INSERT INTO portfolio_catalog (user_id, song_title, artist_name, featuring_artists, album_art, release_date, genre, description, streaming_links, order_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [userId, song_title, artist_name, featuring_artists, album_art, release_date, genre, description, streaming_links || '{}', nextOrder]
-    );
+    let parsedStreamingLinks = {};
+    if (typeof streaming_links === 'string') {
+      try {
+        parsedStreamingLinks = JSON.parse(streaming_links);
+      } catch (e) {
+        parsedStreamingLinks = {};
+      }
+    } else if (streaming_links && typeof streaming_links === 'object') {
+      parsedStreamingLinks = streaming_links;
+    }
+
+    await PortfolioCatalog.create({
+      user_id: userId,
+      song_title: song_title.trim(),
+      artist_name: artist_name.trim(),
+      featuring_artists: (featuring_artists || '').trim(),
+      album_art,
+      release_date: new Date(release_date),
+      genre: (genre || '').trim(),
+      description: (description || '').trim(),
+      streaming_links: parsedStreamingLinks,
+      order_index: nextOrder
+    });
 
     res.json({ message: 'Catalog item added' });
   } catch (err) {
@@ -304,15 +331,23 @@ router.post('/my/catalog', verifyToken, requireArtist, upload.single('album_art'
 router.put('/my/catalog/reorder', verifyToken, requireArtist, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { orderUpdates } = req.body; // array of { id, order_index }
+    const { orderUpdates } = req.body;
 
     if (!Array.isArray(orderUpdates) || orderUpdates.length > 200) {
       return res.status(400).json({ message: 'Invalid reorder data.' });
     }
 
-    for (const item of orderUpdates) {
-      if (typeof item.id !== 'number' && typeof item.id !== 'string') continue;
-      await db.query('UPDATE portfolio_catalog SET order_index = ? WHERE id = ? AND user_id = ?', [item.order_index, item.id, userId]);
+    const bulkOps = orderUpdates
+      .filter(item => item.id && mongoose.Types.ObjectId.isValid(item.id))
+      .map(item => ({
+        updateOne: {
+          filter: { _id: item.id, user_id: userId },
+          update: { $set: { order_index: item.order_index } }
+        }
+      }));
+
+    if (bulkOps.length > 0) {
+      await PortfolioCatalog.bulkWrite(bulkOps);
     }
 
     res.json({ message: 'Catalog reordered' });
@@ -328,7 +363,11 @@ router.delete('/my/catalog/:id', verifyToken, requireArtist, async (req, res) =>
     const userId = req.user.id;
     const { id } = req.params;
 
-    await db.query('DELETE FROM portfolio_catalog WHERE id = ? AND user_id = ?', [id, userId]);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid item ID' });
+    }
+
+    await PortfolioCatalog.findOneAndDelete({ _id: id, user_id: userId });
     res.json({ message: 'Catalog item removed' });
   } catch (err) {
     console.error('Error deleting catalog item:', err);
@@ -340,24 +379,20 @@ router.delete('/my/catalog/:id', verifyToken, requireArtist, async (req, res) =>
 router.post('/my/feature', verifyToken, requireArtist, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { release_ids } = req.body; // Array of up to 3 pinned release IDs
+    const { release_ids } = req.body;
 
     if (!Array.isArray(release_ids) || release_ids.length > 3) {
       return res.status(400).json({ message: 'You can feature a maximum of 3 releases.' });
     }
 
-    // Get existing theme options
-    const [portfolios] = await db.query('SELECT theme_options FROM artist_portfolios WHERE user_id = ?', [userId]);
-    let themeOptions = {};
-    if (portfolios && portfolios.length > 0) {
-      themeOptions = typeof portfolios[0].theme_options === 'string'
-        ? JSON.parse(portfolios[0].theme_options || '{}')
-        : (portfolios[0].theme_options || {});
-    }
-
+    const portfolio = await ensurePortfolio(userId);
+    const themeOptions = { ...(portfolio.theme_options || {}) };
     themeOptions.featured_releases = release_ids;
 
-    await db.query('UPDATE artist_portfolios SET theme_options = ? WHERE user_id = ?', [JSON.stringify(themeOptions), userId]);
+    portfolio.theme_options = themeOptions;
+    portfolio.updated_at = new Date();
+    await portfolio.save();
+
     res.json({ message: 'Featured releases updated successfully' });
   } catch (err) {
     console.error('Error updating featured releases:', err);
@@ -378,17 +413,20 @@ router.post('/my/events', verifyToken, requireArtist, upload.single('poster_imag
 
     const poster_image = req.file ? '/uploads/' + req.file.filename : null;
 
-    let formattedDate = event_date;
-    if (formattedDate && formattedDate.length === 10) {
-      formattedDate += ' 00:00:00';
-    }
+    const event = await ArtistEvent.create({
+      user_id: userId,
+      title: title.trim(),
+      event_type,
+      event_date: new Date(event_date),
+      event_time: (event_time || '').trim() || null,
+      venue: (venue || '').trim() || null,
+      city: (city || '').trim() || null,
+      description: (description || '').trim() || null,
+      ticket_link: (ticket_link || '').trim() || null,
+      poster_image
+    });
 
-    const [result] = await db.query(
-      'INSERT INTO artist_events (user_id, title, event_type, event_date, event_time, venue, city, description, ticket_link, poster_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [userId, title, event_type, formattedDate, event_time || null, venue || null, city || null, description || null, ticket_link || null, poster_image]
-    );
-
-    res.status(201).json({ message: 'Event created', id: result.insertId, poster_image });
+    res.status(201).json({ message: 'Event created', id: event._id.toString(), poster_image });
   } catch (err) {
     console.error('Error creating event:', err);
     res.status(500).json({ message: 'Failed to create event' });
@@ -406,25 +444,33 @@ router.put('/my/events/:id', verifyToken, requireArtist, upload.single('poster_i
       return res.status(400).json({ message: 'Title, type and date are required' });
     }
 
-    // Get current poster_image
-    const [existing] = await db.query('SELECT poster_image FROM artist_events WHERE id = ? AND user_id = ?', [id, userId]);
-    let poster_image = (existing && existing.length > 0) ? existing[0].poster_image : null;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
 
+    const existing = await ArtistEvent.findOne({ _id: id, user_id: userId });
+    if (!existing) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+
+    let poster_image = existing.poster_image;
     if (req.file) {
       poster_image = '/uploads/' + req.file.filename;
     } else if (remove_poster === 'true' || remove_poster === true) {
       poster_image = null;
     }
 
-    let formattedDate = event_date;
-    if (formattedDate && formattedDate.length === 10) {
-      formattedDate += ' 00:00:00';
-    }
+    existing.title = title.trim();
+    existing.event_type = event_type;
+    existing.event_date = new Date(event_date);
+    existing.event_time = (event_time || '').trim() || null;
+    existing.venue = (venue || '').trim() || null;
+    existing.city = (city || '').trim() || null;
+    existing.description = (description || '').trim() || null;
+    existing.ticket_link = (ticket_link || '').trim() || null;
+    existing.poster_image = poster_image;
 
-    await db.query(
-      'UPDATE artist_events SET title = ?, event_type = ?, event_date = ?, event_time = ?, venue = ?, city = ?, description = ?, ticket_link = ?, poster_image = ? WHERE id = ? AND user_id = ?',
-      [title, event_type, formattedDate, event_time || null, venue || null, city || null, description || null, ticket_link || null, poster_image, id, userId]
-    );
+    await existing.save();
 
     res.json({ message: 'Event updated', poster_image });
   } catch (err) {
@@ -439,7 +485,11 @@ router.delete('/my/events/:id', verifyToken, requireArtist, async (req, res) => 
     const userId = req.user.id;
     const { id } = req.params;
 
-    await db.query('DELETE FROM artist_events WHERE id = ? AND user_id = ?', [id, userId]);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+
+    await ArtistEvent.findOneAndDelete({ _id: id, user_id: userId });
     res.json({ message: 'Event deleted' });
   } catch (err) {
     console.error('Error deleting event:', err);
@@ -455,16 +505,15 @@ router.get('/:slug', async (req, res) => {
     const { slug } = req.params;
     const cleanSlug = (slug || '').trim().toLowerCase();
 
-    // Validate slug format before hitting the database
     if (!cleanSlug || !isValidSlug(cleanSlug)) {
       return res.status(400).json({ message: 'Invalid portfolio URL.' });
     }
 
-    let [portfolios] = await db.query('SELECT * FROM artist_portfolios WHERE LOWER(slug) = LOWER(?)', [cleanSlug]);
+    let portfolio = await ArtistPortfolio.findOne({ slug: cleanSlug });
 
     // Fallback: Check if cleanSlug matches any user's artist_name or name
-    if (!portfolios || portfolios.length === 0) {
-      const [allUsers] = await db.query('SELECT id, name, artist_name FROM users');
+    if (!portfolio) {
+      const allUsers = await User.find().select('name artist_name');
       const normalizedQuery = cleanSlug.replace(/[^a-z0-9]/g, '');
       const matchedUser = allUsers.find(u => {
         const normName = (u.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -473,46 +522,34 @@ router.get('/:slug', async (req, res) => {
       });
 
       if (matchedUser) {
-        await ensurePortfolio(matchedUser.id);
-        const [found] = await db.query('SELECT * FROM artist_portfolios WHERE user_id = ?', [matchedUser.id]);
-        if (found && found.length > 0) {
-          portfolios = found;
-        }
+        portfolio = await ensurePortfolio(matchedUser._id);
       }
     }
 
-    if (!portfolios || portfolios.length === 0) {
+    if (!portfolio) {
       return res.status(404).json({ message: 'Portfolio not found' });
     }
 
-    const portfolio = portfolios[0];
-
-    // Parse JSON fields
-    if (typeof portfolio.roles === 'string') portfolio.roles = JSON.parse(portfolio.roles || '[]');
-    if (typeof portfolio.theme_options === 'string') portfolio.theme_options = JSON.parse(portfolio.theme_options || '{}');
-    if (typeof portfolio.social_links === 'string') portfolio.social_links = JSON.parse(portfolio.social_links || '[]');
+    const portfolioObj = portfolio.toObject();
 
     // Get catalog
-    const [catalog] = await db.query('SELECT * FROM portfolio_catalog WHERE user_id = ? ORDER BY order_index ASC', [portfolio.user_id]);
-
-    // Parse catalog JSON
-    const parsedCatalog = catalog.map(item => {
-      if (typeof item.streaming_links === 'string') {
-        item.streaming_links = JSON.parse(item.streaming_links || '{}');
-      }
-      return item;
-    });
+    const catalogDocs = await PortfolioCatalog.find({ user_id: portfolio.user_id }).sort({ order_index: 1 }).lean();
+    const catalog = catalogDocs.map(item => ({
+      ...item,
+      id: item._id.toString()
+    }));
 
     // Get events
-    const [events] = await db.query(
-      'SELECT * FROM artist_events WHERE user_id = ? ORDER BY event_date ASC',
-      [portfolio.user_id]
-    );
+    const eventDocs = await ArtistEvent.find({ user_id: portfolio.user_id }).sort({ event_date: 1 }).lean();
+    const events = eventDocs.map(ev => ({
+      ...ev,
+      id: ev._id.toString()
+    }));
 
     res.json({
-      portfolio,
-      catalog: parsedCatalog,
-      events: events || []
+      portfolio: portfolioObj,
+      catalog,
+      events
     });
   } catch (err) {
     console.error('Error fetching public portfolio:', err);

@@ -1,5 +1,6 @@
 const express = require('express');
-const db = require('../config/db');
+const mongoose = require('mongoose');
+const Stat = require('../models/Stat');
 
 const router = express.Router();
 
@@ -9,30 +10,24 @@ const router = express.Router();
  * @access  Public
  */
 router.get('/spotify/:trackId', async (req, res) => {
-  const trackId = req.params.trackId;
-
-  // Real Integration Checklist:
-  // 1. If Spotify Developer credentials (client_id, client_secret) are configured in .env:
-  //    - Send OAuth client credentials request to https://accounts.spotify.com/api/token to get an access token.
-  //    - Send GET request to https://api.spotify.com/v1/tracks/{trackId} to fetch details.
-  //    - Note: Spotify Web API does NOT expose public playcounts/streams via standard API (only visible to owner in Spotify for Artists dashboard).
-  //    - Therefore, playcounts are either fetched via a scraper, or mock values must be stored in our internal stats table.
+  const { trackId } = req.params;
 
   try {
-    // Attempt to pull stats recorded internally in our database
-    const [rows] = await db.query('SELECT * FROM stats WHERE release_id = ?', [trackId]);
-    
-    if (rows && rows.length > 0) {
+    let stat = null;
+    if (mongoose.Types.ObjectId.isValid(trackId)) {
+      stat = await Stat.findOne({ release_id: trackId });
+    }
+
+    if (stat) {
       return res.json({
         platform: 'Spotify',
         trackId,
-        streams: rows[0].spotify_streams || 0,
-        monthlyListeners: rows[0].monthly_listeners || 0,
+        streams: stat.spotify_streams || 0,
+        monthlyListeners: stat.monthly_listeners || 0,
         integrationType: 'Simulated (Spotify API ready)'
       });
     }
 
-    // Default mock stats if database entry missing
     res.json({
       platform: 'Spotify',
       trackId,
@@ -52,23 +47,20 @@ router.get('/spotify/:trackId', async (req, res) => {
  * @access  Public
  */
 router.get('/apple/:trackId', async (req, res) => {
-  const trackId = req.params.trackId;
-
-  // Real Integration Checklist:
-  // 1. Generate an Apple Music JWT developer token using your private key (.p8 file) and Team ID.
-  // 2. Fetch catalog details using GET https://api.music.apple.com/v1/catalog/{storefront}/songs/{trackId}
-  // 3. To fetch stream numbers (requires Apple Music Partner/Reporting API credentials):
-  //    - Poll report endpoints or read stored database sync states.
+  const { trackId } = req.params;
 
   try {
-    const [rows] = await db.query('SELECT * FROM stats WHERE release_id = ?', [trackId]);
-    
-    if (rows && rows.length > 0) {
+    let stat = null;
+    if (mongoose.Types.ObjectId.isValid(trackId)) {
+      stat = await Stat.findOne({ release_id: trackId });
+    }
+
+    if (stat) {
       return res.json({
         platform: 'Apple Music',
         trackId,
-        streams: rows[0].apple_music_streams || 0,
-        listeners: Math.floor((rows[0].apple_music_streams || 0) * 0.75),
+        streams: stat.apple_music_streams || 0,
+        listeners: Math.floor((stat.apple_music_streams || 0) * 0.75),
         integrationType: 'Simulated (Apple Music API ready)'
       });
     }
