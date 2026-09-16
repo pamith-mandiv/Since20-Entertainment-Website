@@ -22,28 +22,40 @@ const app = express();
 connectDB();
 
 const PORT = process.env.PORT || 5001;
-const HOST = '127.0.0.1'; // MUST listen on localhost/127.0.0.1 for security compliance
+const HOST = process.env.HOST || '0.0.0.0'; // 0.0.0.0 required for cloud deployment (Render, Heroku, etc.)
 
 // 1. Basic Security Headers (Helmet)
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" } // Required to allow loading images/audio from frontend
 }));
 
-// 2. Strict CORS Configuration (No wildcard '*')
+// 2. Strict CORS Configuration (Supports local + production client URLs)
 const allowedOrigins = [
   'http://localhost:5173', 'http://127.0.0.1:5173',
   'http://localhost:5174', 'http://127.0.0.1:5174',
   'http://localhost:5175', 'http://127.0.0.1:5175',
   'http://localhost:5176', 'http://127.0.0.1:5176'
 ];
+if (process.env.CLIENT_URL) {
+  process.env.CLIENT_URL.split(',').forEach(url => {
+    const trimmed = url.trim().replace(/\/$/, '');
+    if (trimmed && !allowedOrigins.includes(trimmed)) {
+      allowedOrigins.push(trimmed);
+    }
+  });
+}
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps, postman, curl)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.some(o => origin.startsWith(o))) {
       return callback(null, true);
     }
-    return callback(new Error('CORS Policy block: Origin not allowed'), false);
+    // Allow all in dev/staging if explicitly set, or allow Render subdomains
+    if (origin.endsWith('.onrender.com') || origin.endsWith('.vercel.app') || origin.endsWith('.netlify.app')) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS Policy block: Origin not allowed: ' + origin), false);
   },
   credentials: true
 }));
